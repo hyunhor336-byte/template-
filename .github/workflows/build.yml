@@ -1,0 +1,140 @@
+name: Build template
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/htmlapk/shell app/src/main/assets/www
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "shell"
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.htmlapk.shell'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.hta.app.zzzzzzzzzzzzzzzz'
+              minSdk 21
+              targetSdk 28
+              versionCode 1
+              versionName '1.0'
+            }
+            buildTypes { debug { minifyEnabled false } }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <application
+              android:label="HTA_APP_NAME_PLACEHOLDER"
+              android:icon="@mipmap/ic_launcher"
+              android:usesCleartextTraffic="true"
+              android:hardwareAccelerated="true"
+              android:allowBackup="true">
+              <activity
+                android:name="com.htmlapk.shell.MainActivity"
+                android:exported="true"
+                android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+                android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/htmlapk/shell/MainActivity.java <<'EOF'
+          package com.htmlapk.shell;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+            private WebView w;
+
+            @Override
+            protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              w = new WebView(this);
+              setContentView(w);
+              WebSettings s = w.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setDatabaseEnabled(true);
+              s.setAllowFileAccess(true);
+              s.setAllowFileAccessFromFileURLs(true);
+              s.setAllowUniversalAccessFromFileURLs(true);
+              s.setMediaPlaybackRequiresUserGesture(false);
+              s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+              w.setWebViewClient(new WebViewClient());
+              w.setWebChromeClient(new WebChromeClient());
+              w.loadUrl("file:///android_asset/www/index.html");
+            }
+
+            @Override
+            public void onBackPressed() {
+              if (w.canGoBack()) w.goBack(); else super.onBackPressed();
+            }
+
+            @Override
+            protected void onPause() { super.onPause(); w.onPause(); }
+
+            @Override
+            protected void onResume() { super.onResume(); w.onResume(); }
+          }
+          EOF
+          cat > app/src/main/assets/www/index.html <<'EOF'
+          <!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><h1>Template</h1>
+          EOF
+          python3 - <<'PY'
+          import zlib, struct, os
+          def png(path, n):
+              raw = b''.join(b'\x00' + bytes([15, 118, 110, 255]) * n for _ in range(n))
+              def ch(t, d):
+                  return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+              data = b'\x89PNG\r\n\x1a\n' + ch(b'IHDR', struct.pack('>IIBBBBB', n, n, 8, 6, 0, 0, 0)) + ch(b'IDAT', zlib.compress(raw)) + ch(b'IEND', b'')
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              open(path, 'wb').write(data)
+          for d, n in [('mdpi', 48), ('hdpi', 72), ('xhdpi', 96), ('xxhdpi', 144), ('xxxhdpi', 192)]:
+              png('app/src/main/res/mipmap-%s/ic_launcher.png' % d, n)
+          PY
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Prepare file
+        run: cp app/build/outputs/apk/debug/app-debug.apk template.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: template-${{ github.run_number }}
+          name: template.apk
+          files: template.apk
