@@ -50,12 +50,19 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
             <application
               android:label="HTA_APP_NAME_PLACEHOLDER"
               android:icon="@mipmap/ic_launcher"
               android:usesCleartextTraffic="true"
               android:hardwareAccelerated="true"
               android:allowBackup="true">
+              <provider
+                android:name="com.htmlapk.shell.ApkProvider"
+                android:authorities="com.hta.app.zzzzzzzzzzzzzzzz.apk"
+                android:exported="false"
+                android:grantUriPermissions="true"/>
               <activity
                 android:name="com.htmlapk.shell.MainActivity"
                 android:exported="true"
@@ -73,14 +80,35 @@ jobs:
           package com.htmlapk.shell;
 
           import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.provider.Settings;
+          import android.util.Base64;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.ValueCallback;
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
+          import android.widget.Toast;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
 
           public class MainActivity extends Activity {
+            private static final int REQ_FILE = 1;
             private WebView w;
+            private ValueCallback<Uri[]> fileCb;
+            private FileOutputStream out;
+            private File outFile;
+            private String outName = "app.apk";
 
             @Override
             protected void onCreate(Bundle b) {
@@ -96,9 +124,133 @@ jobs:
               s.setAllowUniversalAccessFromFileURLs(true);
               s.setMediaPlaybackRequiresUserGesture(false);
               s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+              w.addJavascriptInterface(new Bridge(), "HtaBridge");
               w.setWebViewClient(new WebViewClient());
-              w.setWebChromeClient(new WebChromeClient());
+              w.setWebChromeClient(new WebChromeClient() {
+                @Override
+                public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                  if (fileCb != null) fileCb.onReceiveValue(null);
+                  fileCb = cb;
+                  try {
+                    startActivityForResult(p.createIntent(), REQ_FILE);
+                  } catch (Exception e) {
+                    fileCb = null;
+                    return false;
+                  }
+                  return true;
+                }
+              });
               w.loadUrl("file:///android_asset/www/index.html");
+            }
+
+            @Override
+            protected void onActivityResult(int rc, int res, Intent d) {
+              if (rc == REQ_FILE) {
+                if (fileCb != null) {
+                  fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, d));
+                  fileCb = null;
+                }
+              } else {
+                super.onActivityResult(rc, res, d);
+              }
+            }
+
+            private String saveToDownloads() {
+              try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                  ContentValues v = new ContentValues();
+                  v.put(MediaStore.MediaColumns.DISPLAY_NAME, outName);
+                  v.put(MediaStore.MediaColumns.MIME_TYPE, "application/vnd.android.package-archive");
+                  v.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download");
+                  Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                  if (u == null) return "داخل التطبيق فقط";
+                  OutputStream os = getContentResolver().openOutputStream(u);
+                  copy(outFile, os);
+                  return "Download/" + outName;
+                } else {
+                  File d = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                  d.mkdirs();
+                  copy(outFile, new FileOutputStream(new File(d, outName)));
+                  return "Download/" + outName;
+                }
+              } catch (Exception e) {
+                return "داخل التطبيق فقط";
+              }
+            }
+
+            private void copy(File f, OutputStream os) throws Exception {
+              InputStream is = new FileInputStream(f);
+              byte[] buf = new byte[65536];
+              int n;
+              while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+              is.close();
+              os.close();
+            }
+
+            private void doInstall() {
+              try {
+                if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+                  Toast.makeText(this, "اسمح بالتثبيت من هذا التطبيق ثم ارجع واضغط تثبيت", Toast.LENGTH_LONG).show();
+                  startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                  return;
+                }
+                Uri u = Uri.parse("content://" + getPackageName() + ".apk/" + Uri.encode(outName));
+                Intent i = new Intent(Intent.ACTION_VIEW);
+                i.setDataAndType(u, "application/vnd.android.package-archive");
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+              } catch (Exception e) {
+                Toast.makeText(this, "تعذر فتح التثبيت: " + e, Toast.LENGTH_LONG).show();
+              }
+            }
+
+            class Bridge {
+              @JavascriptInterface
+              public String begin(String name) {
+                try {
+                  File dir = new File(getCacheDir(), "apks");
+                  dir.mkdirs();
+                  String n = name.replaceAll("[\\\\/:*?\"<>|]+", "_");
+                  if (!n.endsWith(".apk")) n += ".apk";
+                  outName = n;
+                  outFile = new File(dir, outName);
+                  out = new FileOutputStream(outFile);
+                  return "ok";
+                } catch (Exception e) {
+                  return "err:" + e;
+                }
+              }
+
+              @JavascriptInterface
+              public String chunk(String b64) {
+                try {
+                  out.write(Base64.decode(b64, Base64.DEFAULT));
+                  return "ok";
+                } catch (Exception e) {
+                  return "err:" + e;
+                }
+              }
+
+              @JavascriptInterface
+              public String finish(boolean install) {
+                try {
+                  out.close();
+                  String where = saveToDownloads();
+                  if (install) runOnUiThread(new Runnable() {
+                    public void run() { doInstall(); }
+                  });
+                  return "ok:" + where;
+                } catch (Exception e) {
+                  return "err:" + e;
+                }
+              }
+
+              @JavascriptInterface
+              public void installLast() {
+                runOnUiThread(new Runnable() {
+                  public void run() { doInstall(); }
+                });
+              }
             }
 
             @Override
@@ -111,6 +263,59 @@ jobs:
 
             @Override
             protected void onResume() { super.onResume(); w.onResume(); }
+          }
+          EOF
+          cat > app/src/main/java/com/htmlapk/shell/ApkProvider.java <<'EOF'
+          package com.htmlapk.shell;
+
+          import android.content.ContentProvider;
+          import android.content.ContentValues;
+          import android.database.Cursor;
+          import android.database.MatrixCursor;
+          import android.net.Uri;
+          import android.os.ParcelFileDescriptor;
+          import android.provider.OpenableColumns;
+          import java.io.File;
+          import java.io.FileNotFoundException;
+
+          public class ApkProvider extends ContentProvider {
+            private File f(Uri u) throws FileNotFoundException {
+              String n = u.getLastPathSegment();
+              if (n == null || n.contains("/") || n.contains("..")) throw new FileNotFoundException();
+              return new File(new File(getContext().getCacheDir(), "apks"), n);
+            }
+
+            @Override
+            public boolean onCreate() { return true; }
+
+            @Override
+            public ParcelFileDescriptor openFile(Uri u, String m) throws FileNotFoundException {
+              return ParcelFileDescriptor.open(f(u), ParcelFileDescriptor.MODE_READ_ONLY);
+            }
+
+            @Override
+            public Cursor query(Uri u, String[] p, String s, String[] a, String o) {
+              try {
+                File file = f(u);
+                MatrixCursor c = new MatrixCursor(new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
+                c.addRow(new Object[]{file.getName(), file.length()});
+                return c;
+              } catch (Exception e) {
+                return null;
+              }
+            }
+
+            @Override
+            public String getType(Uri u) { return "application/vnd.android.package-archive"; }
+
+            @Override
+            public Uri insert(Uri u, ContentValues v) { return null; }
+
+            @Override
+            public int delete(Uri u, String s, String[] a) { return 0; }
+
+            @Override
+            public int update(Uri u, ContentValues v, String s, String[] a) { return 0; }
           }
           EOF
           cat > app/src/main/assets/www/index.html <<'EOF'
